@@ -28,6 +28,7 @@ jobs:
           packages: >
             yay-bin
             uv-bin
+            kwin-effects-better-blur-dx
           # missing_pacman_dependencies: >
           #   libusb-compat
 

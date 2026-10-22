@@ -1,98 +1,72 @@
-name: build-repo
+name: Make Repository
 
 on:
-  push:
-    branches: [main]
-    paths: ['packages/**']
   workflow_dispatch:
+  push:
+    branches: [main]          # change to master if that's your default branch
+  schedule:
+    - cron: "21 4 * * 0"      # weekly rebuild, Sundays 04:21 UTC
 
 permissions: {}
 
-env:
-  REPO_NAME: myrepo   # change; must match the [section] in your pacman.conf
+concurrency:
+  group: make-repository
+  cancel-in-progress: false
 
 jobs:
-  # Job 1: runs untrusted-ish PKGBUILD code. No secrets, read-only token.
+  # Job 1: builds AUR packages (runs unreviewed PKGBUILDs). Read-only, no secrets.
   build:
-    runs-on: ubuntu-24.04
-    container: archlinux:base-devel
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: read
     steps:
-      - name: Prepare
-        run: |
-          pacman -Syu --noconfirm git
-          useradd -m builder
-          echo 'builder ALL=(root) NOPASSWD: /usr/bin/pacman' > /etc/sudoers.d/builder
-
-      # TODO: pin to a full commit SHA instead of a tag
-      - uses: actions/checkout@v4
+      # TODO: replace @v1 with a full commit SHA of kopp/build-aur-packages
+      - name: Build packages
+        uses: kopp/build-aur-packages@v1
         with:
-          persist-credentials: false
+          packages: >
+            yay-bin
+            uv-bin
+          # missing_pacman_dependencies: >
+          #   libusb-compat
 
-      - name: Build every package in packages/
+      # Resolve symlinks (aurci2.db -> aurci2.db.tar.*) so release upload works
+      - name: Stage files
         run: |
-          mkdir out
-          chown -R builder:builder .
-          for d in packages/*/; do
-            su builder -c "cd '$d' && PKGDEST='$PWD/out' makepkg -s --noconfirm --needed --cleanbuild"
-          done
-          ls -l out
+          mkdir -p /tmp/stage
+          find "$GITHUB_WORKSPACE" -maxdepth 1 \( -type f -o -type l \) \
+            -exec cp -L -t /tmp/stage {} +
+          cd /tmp/stage
+          mv aurci2.db parchre.db
+          mv aurci2.files parchre.files
+          ls -l
 
       - uses: actions/upload-artifact@v4
         with:
-          name: pkgs
-          path: out/*.pkg.tar.zst
+          name: repo
+          path: /tmp/stage/*
           if-no-files-found: error
 
-  # Job 2: has the signing key, but never executes any PKGBUILD.
+  # Job 2: only publishes. Never runs any PKGBUILD.
   publish:
     needs: build
-    runs-on: ubuntu-24.04
-    container: archlinux:base
+    runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Install tools
-        run: pacman -Syu --noconfirm gnupg github-cli
-
       - uses: actions/download-artifact@v4
         with:
-          name: pkgs
-          path: repo
+          name: repo
+          path: stage
 
-      - name: Sign and publish
+      - name: Replace release contents
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-          GPG_KEY_ID: ${{ vars.GPG_KEY_ID }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          R="$GITHUB_REPOSITORY"
-          echo "$GPG_PRIVATE_KEY" | gpg --batch --import
-          cd repo
-
-          # Make sure the release that hosts the repo exists
-          gh release view repo -R "$R" >/dev/null 2>&1 || \
-            gh release create repo -R "$R" --title repo --notes "pacman repository"
-
-          # Pull existing databases so older packages stay listed
-          gh release download repo -R "$R" -p "$REPO_NAME.db"    -O "$REPO_NAME.db.tar.zst"    || true
-          gh release download repo -R "$R" -p "$REPO_NAME.files" -O "$REPO_NAME.files.tar.zst" || true
-
-          # Sign each package, then add to the (signed) database
-          for p in *.pkg.tar.zst; do
-            gpg --batch --yes --detach-sign --no-armor --local-user "$GPG_KEY_ID" "$p"
-          done
-          repo-add --sign --key "$GPG_KEY_ID" "$REPO_NAME.db.tar.zst" *.pkg.tar.zst
-
-          # Release assets can't be symlinks: publish real copies under the names pacman requests
-          cp -L "$REPO_NAME.db.tar.zst"        "$REPO_NAME.db"
-          cp -L "$REPO_NAME.db.tar.zst.sig"    "$REPO_NAME.db.sig"
-          cp -L "$REPO_NAME.files.tar.zst"     "$REPO_NAME.files"
-          cp -L "$REPO_NAME.files.tar.zst.sig" "$REPO_NAME.files.sig"
-
-          gh release upload repo -R "$R" --clobber \
-            *.pkg.tar.zst *.pkg.tar.zst.sig \
-            "$REPO_NAME.db" "$REPO_NAME.db.sig" \
-            "$REPO_NAME.files" "$REPO_NAME.files.sig"
+          gh release delete parchre -R "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create parchre -R "$GITHUB_REPOSITORY" \
+            --title "build $GITHUB_RUN_NUMBER" \
+            --notes "pacman repo, build $GITHUB_RUN_NUMBER" \
+            stage/*

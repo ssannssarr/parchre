@@ -29,6 +29,7 @@ jobs:
             yay-bin
             uv-bin
             kwin-effects-better-blur-dx
+            freedownloadmanager
           # missing_pacman_dependencies: >
           #   libusb-compat
 

@@ -26,6 +26,7 @@ jobs:
         uses: kopp/build-aur-packages@v1
         with:
           packages:
+              yay-bin
           # missing_pacman_dependencies: >
           #   libusb-compat
 
